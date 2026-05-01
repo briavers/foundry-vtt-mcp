@@ -50,6 +50,10 @@ export class QueryHandlers {
 
     // Phase 2 & 3: Write operation queries
     CONFIG.queries[`${modulePrefix}.createActorFromCompendium`] = this.handleCreateActorFromCompendium.bind(this);
+    CONFIG.queries[`${modulePrefix}.listActorFolders`] = this.handleListActorFolders.bind(this);
+    CONFIG.queries[`${modulePrefix}.createActorFolder`] = this.handleCreateActorFolder.bind(this);
+    CONFIG.queries[`${modulePrefix}.createActor`] = this.handleCreateActor.bind(this);
+    CONFIG.queries[`${modulePrefix}.updateActor`] = this.handleUpdateActor.bind(this);
     CONFIG.queries[`${modulePrefix}.getCompendiumDocumentFull`] = this.handleGetCompendiumDocumentFull.bind(this);
     CONFIG.queries[`${modulePrefix}.addActorsToScene`] = this.handleAddActorsToScene.bind(this);
     CONFIG.queries[`${modulePrefix}.validateWritePermissions`] = this.handleValidateWritePermissions.bind(this);
@@ -1357,6 +1361,96 @@ export class QueryHandlers {
       });
     } catch (error) {
       throw new Error(`Failed to search character items: ${error instanceof Error ? error.message : 'Unknown error'}`);
+    }
+  }
+
+  private async handleListActorFolders(_data: unknown): Promise<any> {
+    try {
+      const gmCheck = this.validateGMAccess();
+      if (!gmCheck.allowed) {
+        return { error: 'Access denied', success: false };
+      }
+      this.dataAccess.validateFoundryState();
+      return this.dataAccess.listActorFolders();
+    } catch (error) {
+      throw new Error(`Failed to list actor folders: ${error instanceof Error ? error.message : 'Unknown error'}`);
+    }
+  }
+
+  private async handleCreateActorFolder(data: {
+    name: string;
+    description?: string;
+    color?: string;
+    parentFolder?: string;
+  }): Promise<any> {
+    try {
+      const gmCheck = this.validateGMAccess();
+      if (!gmCheck.allowed) {
+        return { error: 'Access denied', success: false };
+      }
+      this.dataAccess.validateFoundryState();
+      return await this.dataAccess.createActorFolder(data);
+    } catch (error) {
+      throw new Error(`Failed to create actor folder: ${error instanceof Error ? error.message : 'Unknown error'}`);
+    }
+  }
+
+  private async handleCreateActor(data: {
+    name: string;
+    type?: string;
+    folder?: string;
+    img?: string;
+    biography?: string;
+    hp?: { value?: number; max?: number };
+    ac?: number;
+    abilities?: { str?: number; dex?: number; con?: number; int?: number; wis?: number; cha?: number };
+    cr?: number;
+    size?: string;
+    alignment?: string;
+    creatureType?: string;
+    speed?: number;
+    addToScene?: boolean;
+    placement?: { type: string; coordinates?: { x: number; y: number }[] };
+    systemData?: Record<string, unknown>;
+  }): Promise<any> {
+    try {
+      const gmCheck = this.validateGMAccess();
+      if (!gmCheck.allowed) {
+        return { error: 'Access denied', success: false };
+      }
+      this.dataAccess.validateFoundryState();
+      return await this.dataAccess.createActor(data);
+    } catch (error) {
+      throw new Error(`Failed to create actor: ${error instanceof Error ? error.message : 'Unknown error'}`);
+    }
+  }
+
+  private async handleUpdateActor(data: {
+    actorId?: string;
+    actorName?: string;
+    name?: string;
+    folder?: string;
+    img?: string;
+    biography?: string;
+    hp?: { value?: number; max?: number };
+    ac?: number;
+    abilities?: { str?: number; dex?: number; con?: number; int?: number; wis?: number; cha?: number };
+    cr?: number;
+    size?: string;
+    alignment?: string;
+    creatureType?: string;
+    speed?: number;
+    systemData?: Record<string, unknown>;
+  }): Promise<any> {
+    try {
+      const gmCheck = this.validateGMAccess();
+      if (!gmCheck.allowed) {
+        return { error: 'Access denied', success: false };
+      }
+      this.dataAccess.validateFoundryState();
+      return await this.dataAccess.updateActor(data);
+    } catch (error) {
+      throw new Error(`Failed to update actor: ${error instanceof Error ? error.message : 'Unknown error'}`);
     }
   }
 
