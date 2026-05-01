@@ -42,8 +42,9 @@ export class WebRTCPeer {
    * Handle incoming WebRTC offer from browser client
    * Returns answer to be sent back to client
    *
-   * Critical: Send answer IMMEDIATELY, then trickle ICE candidates
-   * Don't wait for data channel or ICE gathering before answering
+   * Must wait for ICE gathering to complete before returning the answer so that
+   * the SDP answer includes the server's host candidates. Without them the
+   * browser has no address to connect to and the P2P channel never opens.
    */
   async handleOffer(offer: RTCSessionDescriptionInit): Promise<RTCSessionDescriptionInit> {
     const startTime = Date.now();
@@ -61,22 +62,48 @@ export class WebRTCPeer {
     await this.peerConnection.setRemoteDescription(offer as any);
     this.logger.info(`[WebRTC Timing] setRemoteDescription took ${Date.now() - t1}ms`);
 
-    // Step 2: Create answer IMMEDIATELY - don't wait for data channel or ICE
+    // Step 2: Create answer
     const t2 = Date.now();
     const answer = await this.peerConnection.createAnswer();
     this.logger.info(`[WebRTC Timing] createAnswer took ${Date.now() - t2}ms`);
 
-    // Step 3: Set local description
+    // Step 3: Set local description (triggers ICE gathering)
     const t3 = Date.now();
     await this.peerConnection.setLocalDescription(answer);
     this.logger.info(`[WebRTC Timing] setLocalDescription took ${Date.now() - t3}ms`);
 
-    this.logger.info(`[WebRTC Timing] Answer ready in ${Date.now() - startTime}ms - sending immediately`);
+    // Step 4: Wait for ICE gathering so the answer SDP includes our host candidates.
+    // Without this the browser receives an answer with no candidates and the
+    // data channel never opens.
+    const t4 = Date.now();
+    await this.waitForIceGathering();
+    this.logger.info(`[WebRTC Timing] ICE gathering took ${Date.now() - t4}ms`);
 
-    // Data channel and ICE will arrive later via events - don't wait!
-    // The ondatachannel event will fire when the channel is ready
+    this.logger.info(`[WebRTC Timing] Answer ready in ${Date.now() - startTime}ms`);
 
     return this.peerConnection.localDescription as RTCSessionDescriptionInit;
+  }
+
+  private async waitForIceGathering(): Promise<void> {
+    return new Promise<void>((resolve) => {
+      if (this.peerConnection?.iceGatheringState === 'complete') {
+        resolve();
+        return;
+      }
+
+      // Safety timeout — resolve anyway so the HTTP response isn't held forever
+      const timeout = setTimeout(() => {
+        this.logger.warn('[WebRTC] ICE gathering timeout, returning answer with available candidates');
+        resolve();
+      }, 5000);
+
+      this.peerConnection!.iceGatheringStateChange.subscribe((state) => {
+        if (state === 'complete') {
+          clearTimeout(timeout);
+          resolve();
+        }
+      });
+    });
   }
 
   private setupPeerConnectionHandlers(): void {
@@ -132,6 +159,13 @@ export class WebRTCPeer {
       this.logger.info('[WebRTC] ✓ Data channel opened - connection fully ready!');
       this.isConnected = true;
     };
+
+    // If ondatachannel fired after the channel was already open, onopen will
+    // never fire — check the state immediately after registering the handler.
+    if (this.dataChannel.readyState === 'open') {
+      this.logger.info('[WebRTC] ✓ Data channel already open when handler registered');
+      this.isConnected = true;
+    }
 
     this.dataChannel.onclose = () => {
       this.logger.info('[WebRTC] Data channel closed');
