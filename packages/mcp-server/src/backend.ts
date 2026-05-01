@@ -1483,6 +1483,30 @@ async function startBackend(): Promise<void> {
 
                   break;
 
+                case 'list-actor-folders':
+
+                  result = await actorCreationTools.handleListActorFolders(args);
+
+                  break;
+
+                case 'create-actor-folder':
+
+                  result = await actorCreationTools.handleCreateActorFolder(args);
+
+                  break;
+
+                case 'create-actor':
+
+                  result = await actorCreationTools.handleCreateActor(args);
+
+                  break;
+
+                case 'update-actor':
+
+                  result = await actorCreationTools.handleUpdateActor(args);
+
+                  break;
+
                 // DSA5 character creation tools
 
                 case 'create-dsa5-character-from-archetype':

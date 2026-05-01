@@ -1,6 +1,22 @@
 import { MODULE_ID, ERROR_MESSAGES, TOKEN_DISPOSITIONS } from './constants.js';
 import { permissionManager } from './permissions.js';
 import { transactionManager } from './transaction-manager.js';
+
+function unflattenObject(flat: Record<string, unknown>): Record<string, unknown> {
+  const result: Record<string, unknown> = {};
+  for (const [key, value] of Object.entries(flat)) {
+    const parts = key.split('.');
+    let current: Record<string, unknown> = result;
+    for (let i = 0; i < parts.length - 1; i++) {
+      if (current[parts[i]] === undefined || typeof current[parts[i]] !== 'object') {
+        current[parts[i]] = {};
+      }
+      current = current[parts[i]] as Record<string, unknown>;
+    }
+    current[parts[parts.length - 1]] = value;
+  }
+  return result;
+}
 // Local type definitions to avoid shared package import issues
 interface CharacterInfo {
   id: string;
@@ -5022,6 +5038,300 @@ export class FoundryDataAccess {
       console.warn(`[${this.moduleId}] Failed to create folder "${folderName}":`, error);
       // Return null so items are created without folders rather than failing
       return null;
+    }
+  }
+
+  listActorFolders(): { folders: { id: string; name: string; color: string | null; parentId: string | null; depth: number }[] } {
+    this.validateFoundryState();
+
+    const allFolders: any[] = (game.folders?.contents || []).filter((f: any) => f.type === 'Actor');
+
+    const depthOf = (folder: any, visited = new Set<string>()): number => {
+      if (!folder.folder || visited.has(folder.id)) return 0;
+      visited.add(folder.id);
+      const parent = allFolders.find((f: any) => f.id === folder.folder?.id);
+      return parent ? 1 + depthOf(parent, visited) : 1;
+    };
+
+    const folders = allFolders
+      .map((f: any) => ({
+        id: f.id as string,
+        name: f.name as string,
+        color: (f.color as string) || null,
+        parentId: (f.folder?.id as string) || null,
+        depth: depthOf(f),
+      }))
+      .sort((a, b) => a.depth - b.depth || a.name.localeCompare(b.name));
+
+    return { folders };
+  }
+
+  async createActorFolder(request: {
+    name: string;
+    description?: string;
+    color?: string;
+    parentFolder?: string;
+  }): Promise<{ id: string; name: string; success: boolean; alreadyExisted?: boolean }> {
+    this.validateFoundryState();
+
+    const permissionCheck = permissionManager.checkWritePermission('createActor', { quantity: 1 });
+    if (!permissionCheck.allowed) {
+      throw new Error(`Folder creation denied: ${permissionCheck.reason}`);
+    }
+
+    try {
+      const existing = game.folders?.find((f: any) => f.name === request.name && f.type === 'Actor');
+      if (existing) {
+        return { id: existing.id, name: existing.name, success: true, alreadyExisted: true };
+      }
+
+      let parentId: string | null = null;
+      if (request.parentFolder) {
+        const parent = game.folders?.find((f: any) =>
+          (f.id === request.parentFolder || f.name === request.parentFolder) && f.type === 'Actor'
+        );
+        parentId = parent?.id || null;
+      }
+
+      const folder = await Folder.create({
+        name: request.name,
+        type: 'Actor',
+        description: request.description || '',
+        color: request.color || '#4a90e2',
+        parent: parentId,
+        sort: 0,
+        flags: {
+          'foundry-mcp-bridge': { mcpGenerated: true, createdAt: new Date().toISOString() }
+        },
+      });
+
+      if (!folder) throw new Error('Folder creation returned null');
+
+      this.auditLog('createActorFolder', request, 'success');
+      return { id: folder.id, name: folder.name, success: true };
+    } catch (error) {
+      this.auditLog('createActorFolder', request, 'failure', error instanceof Error ? error.message : 'Unknown error');
+      throw error;
+    }
+  }
+
+  async createActor(request: {
+    name: string;
+    type?: string;
+    folder?: string;
+    img?: string;
+    biography?: string;
+    hp?: { value?: number; max?: number };
+    ac?: number;
+    abilities?: { str?: number; dex?: number; con?: number; int?: number; wis?: number; cha?: number };
+    cr?: number;
+    size?: string;
+    alignment?: string;
+    creatureType?: string;
+    speed?: number;
+    addToScene?: boolean;
+    placement?: { type: string; coordinates?: { x: number; y: number }[] };
+    systemData?: Record<string, unknown>;
+  }): Promise<{ id: string; name: string; success: boolean; tokensPlaced: number }> {
+    this.validateFoundryState();
+
+    const permissionCheck = permissionManager.checkWritePermission('createActor', { quantity: 1 });
+    if (!permissionCheck.allowed) {
+      throw new Error(`Actor creation denied: ${permissionCheck.reason}`);
+    }
+
+    try {
+      // Resolve folder ID
+      let folderId: string | null = null;
+      if (request.folder) {
+        const found = game.folders?.find((f: any) =>
+          (f.id === request.folder || f.name === request.folder) && f.type === 'Actor'
+        );
+        folderId = found?.id || await this.getOrCreateFolder(request.folder, 'Actor');
+      }
+
+      // Build system data using D&D 5e shortcut fields
+      const system: Record<string, unknown> = {};
+
+      if (request.biography) {
+        system['details.biography.value'] = request.biography;
+      }
+      if (request.hp?.value !== undefined) system['attributes.hp.value'] = request.hp.value;
+      if (request.hp?.max !== undefined) system['attributes.hp.max'] = request.hp.max;
+      if (request.ac !== undefined) {
+        system['attributes.ac.flat'] = request.ac;
+        system['attributes.ac.calc'] = 'flat';
+      }
+      if (request.cr !== undefined) system['details.cr'] = request.cr;
+      if (request.alignment) system['details.alignment'] = request.alignment;
+      if (request.creatureType) system['details.type.value'] = request.creatureType;
+      if (request.size) system['traits.size'] = request.size;
+      if (request.speed !== undefined) system['attributes.movement.walk'] = request.speed;
+
+      if (request.abilities) {
+        for (const [key, val] of Object.entries(request.abilities)) {
+          if (val !== undefined) system[`abilities.${key}.value`] = val;
+        }
+      }
+
+      // Raw systemData overrides shortcuts
+      if (request.systemData) {
+        Object.assign(system, request.systemData);
+      }
+
+      // Unflatten dot-notation keys into a nested object
+      const nestedSystem = unflattenObject(system);
+
+      const actorData: Record<string, unknown> = {
+        name: request.name,
+        type: request.type || 'npc',
+        system: nestedSystem,
+        folder: folderId,
+      };
+
+      if (request.img) actorData.img = request.img;
+
+      const actor = await Actor.create(actorData as any);
+      if (!actor) throw new Error('Actor.create returned null');
+
+      let tokensPlaced = 0;
+      if (request.addToScene) {
+        try {
+          const sceneResult = await this.addActorsToScene({
+            actorIds: [actor.id],
+            placement: (request.placement?.type as any) || 'grid',
+            hidden: false,
+            ...(request.placement?.coordinates && { coordinates: request.placement.coordinates }),
+          });
+          tokensPlaced = sceneResult.success ? sceneResult.tokensCreated : 0;
+        } catch (_) {
+          // Non-fatal: actor was created, scene placement failed
+        }
+      }
+
+      this.auditLog('createActor', { name: request.name }, 'success');
+      return { id: actor.id, name: actor.name, success: true, tokensPlaced };
+    } catch (error) {
+      this.auditLog('createActor', { name: request.name }, 'failure', error instanceof Error ? error.message : 'Unknown error');
+      throw error;
+    }
+  }
+
+  async updateActor(request: {
+    actorId?: string;
+    actorName?: string;
+    name?: string;
+    folder?: string;
+    img?: string;
+    biography?: string;
+    hp?: { value?: number; max?: number };
+    ac?: number;
+    abilities?: { str?: number; dex?: number; con?: number; int?: number; wis?: number; cha?: number };
+    cr?: number;
+    size?: string;
+    alignment?: string;
+    creatureType?: string;
+    speed?: number;
+    systemData?: Record<string, unknown>;
+  }): Promise<{ id: string; name: string; success: boolean; updatedFields: string[] }> {
+    this.validateFoundryState();
+
+    const permissionCheck = permissionManager.checkWritePermission('createActor', { quantity: 1 });
+    if (!permissionCheck.allowed) {
+      throw new Error(`Actor update denied: ${permissionCheck.reason}`);
+    }
+
+    try {
+      // Resolve the actor
+      let actor: any;
+      if (request.actorId) {
+        actor = game.actors?.get(request.actorId);
+        if (!actor) throw new Error(`Actor with ID "${request.actorId}" not found`);
+      } else if (request.actorName) {
+        actor = game.actors?.find((a: any) => a.name === request.actorName);
+        if (!actor) throw new Error(`Actor named "${request.actorName}" not found`);
+      } else {
+        throw new Error('Either actorId or actorName must be provided');
+      }
+
+      const updates: Record<string, unknown> = {};
+      const updatedFields: string[] = [];
+
+      if (request.name) { updates.name = request.name; updatedFields.push('name'); }
+      if (request.img) { updates.img = request.img; updatedFields.push('img'); }
+
+      if (request.folder !== undefined) {
+        const found = game.folders?.find((f: any) =>
+          (f.id === request.folder || f.name === request.folder) && f.type === 'Actor'
+        );
+        updates.folder = found?.id || null;
+        updatedFields.push('folder');
+      }
+
+      // System shortcuts (D&D 5e dot-notation)
+      if (request.biography !== undefined) {
+        updates['system.details.biography.value'] = request.biography;
+        updatedFields.push('biography');
+      }
+      if (request.hp?.value !== undefined) {
+        updates['system.attributes.hp.value'] = request.hp.value;
+        updatedFields.push('hp.value');
+      }
+      if (request.hp?.max !== undefined) {
+        updates['system.attributes.hp.max'] = request.hp.max;
+        updatedFields.push('hp.max');
+      }
+      if (request.ac !== undefined) {
+        updates['system.attributes.ac.flat'] = request.ac;
+        updates['system.attributes.ac.calc'] = 'flat';
+        updatedFields.push('ac');
+      }
+      if (request.cr !== undefined) {
+        updates['system.details.cr'] = request.cr;
+        updatedFields.push('cr');
+      }
+      if (request.alignment !== undefined) {
+        updates['system.details.alignment'] = request.alignment;
+        updatedFields.push('alignment');
+      }
+      if (request.creatureType !== undefined) {
+        updates['system.details.type.value'] = request.creatureType;
+        updatedFields.push('creatureType');
+      }
+      if (request.size !== undefined) {
+        updates['system.traits.size'] = request.size;
+        updatedFields.push('size');
+      }
+      if (request.speed !== undefined) {
+        updates['system.attributes.movement.walk'] = request.speed;
+        updatedFields.push('speed');
+      }
+      if (request.abilities) {
+        for (const [key, val] of Object.entries(request.abilities)) {
+          if (val !== undefined) {
+            updates[`system.abilities.${key}.value`] = val;
+            updatedFields.push(`abilities.${key}`);
+          }
+        }
+      }
+      if (request.systemData) {
+        for (const [key, val] of Object.entries(request.systemData)) {
+          updates[key] = val;
+          updatedFields.push(key);
+        }
+      }
+
+      if (Object.keys(updates).length === 0) {
+        return { id: actor.id, name: actor.name, success: true, updatedFields: [] };
+      }
+
+      await actor.update(updates);
+
+      this.auditLog('updateActor', { actorId: actor.id }, 'success');
+      return { id: actor.id, name: actor.name, success: true, updatedFields };
+    } catch (error) {
+      this.auditLog('updateActor', request, 'failure', error instanceof Error ? error.message : 'Unknown error');
+      throw error;
     }
   }
 
